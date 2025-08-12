@@ -1,11 +1,13 @@
-## Aeo's Setup Guide: Aeno (renderer)
+## Aeo's Setup Guide: Aeno (Brick Hill Varient)
 
 ### Prerequisites:
 
 Before proceeding with the installation, make sure you meet the following prerequisites:
 
-1. **Operating System:** You can use either Ubuntu/Linux Server (version 20.04+) or a Windows machine with Laragon installed.
-2. **Laragon:** If you're on a Windows machine, download Laragon from [Laragon.org](https://laragon.org).
+1. **Operating System:** You can use either Ubuntu/Linux Server (version 20.04+) or a Windows machine.
+2. **Golang:** Install golang from [golang](https://go.dev/).
+3. **Supervisor:** You can install on linux following this [guide](https://supervisord.org/installing.html)
+4. **Supervisor:** For windows [guide](https://stackoverflow.com/questions/7629813/is-there-windows-analog-to-supervisord)
 
 ### Installation Commands:
 

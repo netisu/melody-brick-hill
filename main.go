@@ -1,933 +1,571 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/joho/godotenv"
-	"github.com/netisu/aeno"
-	"io"
-	"log"
-	"net/http"
-	"os"
-	"path"
-	"reflect"
-	"regexp"
-	"time"
+        "encoding/json"
+        "fmt"
+        "io"
+        "log"
+        "net/http"
+        "os"
+        "path/filepath"
+        "regexp"
+        "strings"
+        "time"
+
+        "github.com/joho/godotenv"
+        "github.com/netisu/aeno"
 )
 
 const (
-	scale      = 1
-	fovy       = 22.5
-	near       = 1.0
-	far        = 1000
-	amb        = "b0b0b0" // d4d4d4
-	lightcolor = "808080" // 696969
-	Dimentions = 512      // april fools (15)
+        scale      = 1
+        fovy       = 50
+        near       = 0.1
+        far        = 1000
+        amb        = "AAAAAA" // d4d4d4
+        lightcolor = "777777" // 696969
+        Dimentions = 512      // april fools (15)
 )
 
 var (
-	eye     = aeno.V(-0.75, 0.85, 2)
-	center  = aeno.V(0, 0, 0)
-	up      = aeno.V(0, 1.5, 0)
-	light   = aeno.V(-1, 3, 1).Normalize()
-	rootDir = "/var/www/renderer"
+        eye          = aeno.V(0.75, 0.85, 2)
+        center       = aeno.V(0, 0.06, 0)
+        up           = aeno.V(0, 1, 0)
+        light        = aeno.V(0, 6, 4).Normalize()
+        cdnDirectory = "/var/www/cdn" // set this to your storage root
+        envDir       = "/var/www/renderer"
 )
-
-type ItemData struct {
-	Item      string     `json:"item"`
-	EditStyle *EditStyle `json:"edit_style"`
-}
-type BodyParts struct {
-	Head     string `json:"head"`
-	Torso    string `json:"torso"`
-	LeftArm  string `json:"left_arm"`
-	RightArm string `json:"right_arm"`
-	LeftLeg  string `json:"left_leg"`
-	RightLeg string `json:"right_leg"`
-}
-
-type EditStyle struct {
-	Hash      string `json:"hash"`
-	IsModel   bool   `json:"is_model"`
-	IsTexture bool   `json:"is_texture"`
-}
-
-type RenderEvent struct {
-	RenderType string     `json:"RenderType"`
-	Hash       string     `json:"Hash"`
-	RenderJson UserConfig `json:"RenderJson"` // Use interface{} for flexibility
-}
-
-type ItemEvent struct {
-	RenderType string     `json:"RenderType"`
-	Hash       string     `json:"Hash"`
-	RenderJson ItemConfig `json:"RenderJson"` // Use interface{} for flexibility
-}
-
-type HatsCollection map[string]ItemData
 
 // hatKeyPattern is a regular expression to match keys like "hat_1", "hat_123", etc.
 var hatKeyPattern = regexp.MustCompile(`^hat_\d+$`)
 
-type UserConfig struct {
-	BodyParts BodyParts `json:"body_parts"`
-	Items     struct {
-		Face   ItemData       `json:"face"`
-		Hats   HatsCollection `json:"hats"`
-		Addon  ItemData       `json:"addon"`
-		Tool   ItemData       `json:"tool"`
-		Head   ItemData       `json:"head"`
-		Pants  ItemData       `json:"pants"`
-		Shirt  ItemData       `json:"shirt"`
-		Tshirt ItemData       `json:"tshirt"`
-	} `json:"items"`
-	Colors map[string]string `json:"colors"`
-}
-
-type ItemConfig struct {
-	ItemType string   `json:"ItemType"`
-	Item     ItemData `json:"item"`
-	PathMod  bool     `json:"PathMod"`
-}
-
-var useDefault UserConfig = UserConfig{
-	BodyParts: BodyParts{
-		Head:     "cranium",
-		Torso:    "chesticle",
-		LeftArm:  "arm_left",
-		RightArm: "arm_right",
-		LeftLeg:  "leg_left",
-		RightLeg: "leg_right",
-	},
-	Items: struct {
-		Face   ItemData       `json:"face"`
-		Hats   HatsCollection `json:"hats"`
-		Addon  ItemData       `json:"addon"`
-		Tool   ItemData       `json:"tool"`
-		Head   ItemData       `json:"head"`
-		Pants  ItemData       `json:"pants"`
-		Shirt  ItemData       `json:"shirt"`
-		Tshirt ItemData       `json:"tshirt"`
-	}{
-		Face: ItemData{Item: "none"},
-		Hats: HatsCollection{
-			"hat_1": {Item: "none"},
-			"hat_2": {Item: "none"},
-			"hat_3": {Item: "none"},
-			"hat_4": {Item: "none"},
-			"hat_5": {Item: "none"},
-			"hat_6": {Item: "none"},
-		},
-		Addon:  ItemData{Item: "none"},
-		Head:   ItemData{Item: "none"},
-		Tool:   ItemData{Item: "none"},
-		Pants:  ItemData{Item: "none"},
-		Shirt:  ItemData{Item: "none"},
-		Tshirt: ItemData{Item: "none"},
-	},
-	Colors: map[string]string{
-		"Head":     "d3d3d3",
-		"Torso":    "a08bd0",
-		"LeftLeg":  "232323",
-		"RightLeg": "232323",
-		"LeftArm":  "d3d3d3",
-		"RightArm": "d3d3d3",
-	},
-}
-
 func env(key string) string {
-
-	err := godotenv.Load(path.Join(rootDir, ".env"))
-	if err != nil {
-		log.Fatalf("Note: .env file not found or could not be loaded.")
-	}
-
-	return os.Getenv(key)
+        // Attempt to load .env file from the envDir
+        err := godotenv.Load(filepath.Join(envDir, ".env"))
+        if err != nil {
+                // Fallback to trying to load from the cdnDirectory
+                err = godotenv.Load(filepath.Join(cdnDirectory, ".env"))
+                if err != nil {
+                        log.Println("Warning: .env file not found in executable path or rootDir. Relying on environment variables.")
+                }
+        }
+        return os.Getenv(key)
 }
 
 func main() {
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+        http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+                if env("POST_KEY") != "" && r.Header.Get("Aeo-Access-Key") != env("POST_KEY") {
+                        fmt.Println("Unauthorized request")
+                        http.Error(w, "Unauthorized request", http.StatusForbidden)
+                        return
+                }
+                if r.Method != http.MethodGet && r.Method != http.MethodPost {
+                        fmt.Println("Method not allowed")
+                        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+                        return
+                }
+                renderCommand(w, r)
+        })
 
-		if env("POST_KEY") != "" && r.Header.Get("Aeo-Access-Key") != env("POST_KEY") {
-			fmt.Println("Unauthorized request")
-			http.Error(w, "Unauthorized request", http.StatusBadRequest)
-			return
-		}
-
-		if r.Method != http.MethodPost {
-			fmt.Println("Method not allowed")
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		renderCommand(w, r)
-	})
-
-	// Start the HTTP server
-	fmt.Printf("Starting server on %s\n", env("SERVER_ADDRESS"))
-	if err := http.ListenAndServe(env("SERVER_ADDRESS"), nil); err != nil {
-		fmt.Println("HTTP server error:", err)
-	}
+        // Start the HTTP server
+        fmt.Printf("Starting server on %s\n", env("SERVER_ADDRESS"))
+        if err := http.ListenAndServe(env("SERVER_ADDRESS"), nil); err != nil {
+                fmt.Println("HTTP server error:", err)
+        }
 }
 
 func renderCommand(w http.ResponseWriter, r *http.Request) {
+        renderType := r.URL.Query().Get("RenderType")
+        if renderType == "" {
+                renderType = r.URL.Query().Get("renderType") // fallback
+        }
+        if renderType == "" {
+                // For backward compatibility, check body if query param is missing
+                body, err := io.ReadAll(r.Body)
+                if err == nil && len(body) > 0 {
+                        var data map[string]interface{}
+                        if json.Unmarshal(body, &data) == nil {
+                                if rt, ok := data["RenderType"].(string); ok {
+                                        renderType = rt
+                                }
+                        }
+                        // Important: Close the body after reading to prevent resource leaks
+                        r.Body.Close()
+                }
+        }
 
-	// Read the request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Error reading request body", http.StatusBadRequest)
-		return
-	}
-	defer r.Body.Close()
-
-	// Decode the request body into a RenderEvent struct
-	var e RenderEvent
-	err = json.Unmarshal([]byte(body), &e)
-	if err != nil {
-		fmt.Println("Error decoding request:", err)
-		fmt.Println("Request Body:", string(body)) // For debugging
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	var i ItemEvent
-	err = json.Unmarshal([]byte(body), &i)
-	if err != nil {
-		fmt.Println("Error decoding request:", err)
-		fmt.Println("Request Body:", string(body)) // For debugging
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	fmt.Println(e.RenderType)
-
-	// Extract query parameters with default values
-	fmt.Println("Running Function", e.RenderType)
-	switch e.RenderType {
-	case "user":
-		renderUser(e, w)
-		renderHeadshot(e, w)
-	case "item":
-		renderItem(i, w)
-	case "item_preview":
-		renderItemPreview(i, w)
-	default:
-		fmt.Println("Invalid renderType:", e.RenderType)
-		return
-	}
+        fmt.Println("Running Function", renderType)
+        switch renderType {
+        case "user":
+                renderUser(w, r)
+        case "item":
+                renderItemPreview(w, r)
+        default:
+                fmt.Println("Invalid or missing RenderType:", renderType)
+                http.Error(w, "Invalid or missing RenderType", http.StatusBadRequest)
+        }
 }
 
-func renderUser(e RenderEvent, w http.ResponseWriter) {
-	// Delegate user avatar rendering logic here
-	s3Config := &aws.Config{
-		Credentials:      credentials.NewStaticCredentials(env("S3_ACCESS_KEY"), env("S3_SECRET_KEY"), ""),
-		Endpoint:         aws.String(env("S3_ENDPOINT")),
-		Region:           aws.String(env("S3_REGION")),
-		S3ForcePathStyle: aws.Bool(true),
-	}
+func renderUser(w http.ResponseWriter, r *http.Request) {
+        hash := r.URL.Query().Get("hash")
+        if hash == "" || hash == "default" {
+                fmt.Println("Avatar Hash is required for renderUser")
+                http.Error(w, "Avatar Hash is required for renderUser", http.StatusBadRequest)
+                return
+        }
 
-	newSession := session.New(s3Config)
+        // Delegate user avatar rendering logic here
+        fmt.Println("Getting userstring", hash)
 
-	// Create an uploader with the session and default options
-	uploader := s3.New(newSession)
+        // Get colors
+        head_color := r.URL.Query().Get("head_color")
+        if head_color == "" {
+                head_color = "f3b700"
+        }
+        torso_color := r.URL.Query().Get("torso_color")
+        if torso_color == "" {
+                torso_color = "f3b700"
+        }
+        leftLeg_color := r.URL.Query().Get("leftLeg_color")
+        if leftLeg_color == "" {
+                leftLeg_color = "f3b700"
+        }
+        rightLeg_color := r.URL.Query().Get("rightLeg_color")
+        if rightLeg_color == "" {
+                rightLeg_color = "f3b700"
+        }
+        leftArm_color := r.URL.Query().Get("leftArm_color")
+        if leftArm_color == "" {
+                leftArm_color = "f3b700"
+        }
+        rightArm_color := r.URL.Query().Get("rightArm_color")
+        if rightArm_color == "" {
+                rightArm_color = "f3b700"
+        }
 
-	fmt.Println("Getting userstring", e.Hash)
+        // Get items
+        hat1 := r.URL.Query().Get("hat_1")
+        if hat1 == "" {
+                hat1 = "none"
+        }
+        hat2 := r.URL.Query().Get("hat_2")
+        if hat2 == "" {
+                hat2 = "none"
+        }
+        hat3 := r.URL.Query().Get("hat_3")
+        if hat3 == "" {
+                hat3 = "none"
+        }
+        hat4 := r.URL.Query().Get("hat_4")
+        if hat4 == "" {
+                hat4 = "none"
+        }
+        hat5 := r.URL.Query().Get("hat_5")
+        if hat5 == "" {
+                hat5 = "none"
+        }
+        hat6 := r.URL.Query().Get("hat_6")
+        if hat6 == "" {
+                hat6 = "none"
+        }
+        face := r.URL.Query().Get("face")
+        if face == "" {
+                face = "none"
+        }
+        tool := r.URL.Query().Get("tool")
+        if tool == "" {
+                tool = "none"
+        }
+        shirt := r.URL.Query().Get("shirt")
+        if shirt == "" {
+                shirt = "none"
+        }
+        tshirt := r.URL.Query().Get("tshirt")
+        if tshirt == "" {
+                tshirt = "none"
+        }
+        pants := r.URL.Query().Get("pants")
+        if pants == "" {
+                pants = "none"
+        }
 
-	// Get UserJson from the URL query parameters
-	userJson := e.RenderJson
+        start := time.Now()
+        fmt.Println("Drawing Objects...")
+        objects := generateObjects(
+                torso_color, leftLeg_color, rightLeg_color, rightArm_color, head_color, face,
+                shirt, pants, tshirt,
+                hat1, hat2, hat3, hat4, hat5, hat6,
+                tool, leftArm_color,
+        )
 
-	// Check if UserJson is present
-	if reflect.ValueOf(userJson).IsZero() {
-		log.Println("Warning: UserJson query parameter is missing, the avatar will not render !")
-		http.Error(w, "UserJson query parameter is missing", http.StatusBadRequest)
-		return
-	}
+        fmt.Println("Exporting to", cdnDirectory, "thumbnails")
+        destPath := filepath.Join(cdnDirectory, "thumbnails", hash) // The hash is the full filename from PHP
+        destDir := filepath.Dir(destPath)
+        if err := os.MkdirAll(destDir, os.ModePerm); err != nil {
+                log.Printf("Failed to create directory %s: %v", destDir, err)
+                http.Error(w, "Internal server error", http.StatusInternalServerError)
+                return
+        }
 
-	start := time.Now()
-	fmt.Println("Drawing Objects...")
-	// Generate the list of objects using the function
-	objects := generateObjects(userJson)
-	fmt.Println("Exporting to", env("TEMP_DIR"), "thumbnails")
-	outputFile := path.Join("thumbnails", e.Hash+".png")
-	outputPath := path.Join(env("TEMP_DIR"), e.Hash+".png") // Renamed 'path' to 'outputPath' to avoid shadowing
+        aeno.GenerateScene(
+                true,
+                destPath,
+                objects,
+                eye,
+                center,
+                up,
+                fovy,
+                Dimentions,
+                scale,
+                light,
+                amb,
+                lightcolor,
+                near,
+                far,
+        )
 
-	aeno.GenerateScene(
-		true,
-		outputPath,
-		objects,
-		eye,
-		center,
-		up,
-		fovy,
-		Dimentions,
-		scale,
-		light,
-		amb,
-		lightcolor,
-		near,
-		far,
-	)
-
-	fmt.Println("Uploading to the", env("S3_BUCKET"), "s3 bucket")
-
-	f, err := os.Open(outputPath)
-	if err != nil {
-		fmt.Printf("Failed to open file %q: %v", outputPath, err) // Log the error
-	}
-	defer f.Close()
-
-	fileInfo, _ := f.Stat()
-	var size int64 = fileInfo.Size()
-	buffer := make([]byte, size)
-	f.Read(buffer)
-
-	object := s3.PutObjectInput{
-		Bucket:             aws.String(env("S3_BUCKET")),
-		Key:                aws.String(outputFile),
-		Body:               bytes.NewReader(buffer),
-		ContentLength:      aws.Int64(size),
-		ContentType:        aws.String("image/png"),
-		ContentDisposition: aws.String("attachment"),
-		ACL:                aws.String("public-read"),
-	}
-
-	fmt.Println("File uploaded")
-	fmt.Printf("%v\n", object)
-	_, err = uploader.PutObject(&object)
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-	_ = os.Remove(outputPath)
-
-	fmt.Println("Completed in", time.Since(start))
-
-	// Set the response content type to image/png
-	w.Header().Set("Content-Type", "image/png")
-
+        fmt.Println("User render completed in", time.Since(start))
+        w.Header().Set("Content-Type", "image/png")
 }
 
-func renderItemPreview(i ItemEvent, w http.ResponseWriter) {
-	var outputFile string
-	var fullPath string
+func renderItemPreview(w http.ResponseWriter, r *http.Request) {
+        itemID := r.URL.Query().Get("item")
+        itemHash := r.URL.Query().Get("itemhash")
+        itemType := r.URL.Query().Get("itemtype")
 
-	// Delegate user avatar rendering logic here
-	s3Config := &aws.Config{
-		Credentials:      credentials.NewStaticCredentials(env("S3_ACCESS_KEY"), env("S3_SECRET_KEY"), ""),
-		Endpoint:         aws.String(env("S3_ENDPOINT")),
-		Region:           aws.String(env("S3_REGION")),
-		S3ForcePathStyle: aws.Bool(true),
-	}
+        if itemHash == "" || itemHash == "none" || itemID == "" {
+                http.Error(w, "Item hash and ID are required for preview", http.StatusBadRequest)
+                return
+        }
+        if itemType == "" {
+                http.Error(w, "Item type is required for preview", http.StatusBadRequest)
+                return
+        }
 
-	newSession := session.New(s3Config)
+        // Default avatar values
+        torso_color, leftLeg_color, rightLeg_color, rightArm_color, head_color, face,
+                shirt, pants, tshirt,
+                hat1, hat2, hat3, hat4, hat5, hat6,
+                tool, leftArm_color := "f3b700", "f3b700", "f3b700", "f3b700", "f3b700", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "f3b700"
 
-	// Create an uploader with the session and default options
-	uploader := s3.New(newSession)
+        // Apply the item to the correct slot
+        switch itemType {
+        case "face":
+                face = itemID
+        case "hat":
+                hat1 = itemID
+        case "tool":
+                tool = itemID
+        case "shirt":
+                shirt = itemID
+        case "tshirt":
+                tshirt = itemID
+        case "pants":
+                pants = itemID
+        }
 
-	if i.Hash == "default" {
-		fmt.Println("Item Hash is required")
-		return
-	}
-	if i.RenderJson.ItemType == "none" {
-		fmt.Println("Item String is required")
-		return
-	}
+        start := time.Now()
+        fmt.Println("Drawing item preview for:", itemHash)
+        objects := generateObjects(
+                torso_color, leftLeg_color, rightLeg_color, rightArm_color, head_color, face,
+                shirt, pants, tshirt,
+                hat1, hat2, hat3, hat4, hat5, hat6,
+                tool, leftArm_color,
+        )
 
-	// Get itemJson from the URL query parameters
-	itemConfig := i.RenderJson
-	itemData := itemConfig.Item
+        destPath := filepath.Join(cdnDirectory, "thumbnails", itemHash) // The hash is the full filename
+        destDir := filepath.Dir(destPath)
+        if err := os.MkdirAll(destDir, os.ModePerm); err != nil {
+                log.Printf("Failed to create directory %s: %v", destDir, err)
+                http.Error(w, "Internal server error", http.StatusInternalServerError)
+                return
+        }
 
-	// Check the inner 'Item' field
-	if itemData.Item == "none" {
-		log.Println("Warning: No item specified in RenderJson for item event.")
-		http.Error(w, "No item specified to render", http.StatusBadRequest)
-		return
-	}
+        aeno.GenerateScene(
+                true,
+                destPath,
+                objects,
+                eye,
+                center,
+                up,
+                fovy,
+                Dimentions,
+                scale,
+                light,
+                amb,
+                lightcolor,
+                near,
+                far,
+        )
 
-	// ... (call generateObjects and GenerateScene with user specific logic)
-	start := time.Now()
-	fmt.Println("Drawing Object for item:", itemData.Item) // Access the inner 'Item' field
-	var objects []*aeno.Object
-
-	// Generate the list of objects using the function
-	objects = generatePreview(itemConfig)
-	fmt.Println("Exporting to", env("TEMP_DIR"), "thumbnails")
-
-	if i.RenderJson.PathMod {
-		outputFile = path.Join("thumbnails", i.Hash+"_preview.png") // Assign to outputFile
-		fullPath = path.Join(env("TEMP_DIR"), i.Hash+".png")        // Construct the full path
-	} else {
-		outputFile = path.Join("thumbnails", i.Hash+".png")  // Assign to outputFile
-		fullPath = path.Join(env("TEMP_DIR"), i.Hash+".png") // Construct the full path
-	}
-
-	aeno.GenerateScene(
-		true,
-		fullPath,
-		objects,
-		eye,
-		center,
-		up,
-		fovy,
-		Dimentions,
-		scale,
-		light,
-		amb,
-		lightcolor,
-		near,
-		far,
-	)
-
-	fmt.Println("Uploading to the", env("S3_BUCKET"), "s3 bucket")
-
-	f, err := os.Open(fullPath)
-	if err != nil {
-		fmt.Printf("Failed to open file %q: %v", fullPath, err) // Log the error
-	}
-	defer f.Close()
-
-	fileInfo, _ := f.Stat()
-	var size int64 = fileInfo.Size()
-	buffer := make([]byte, size)
-	f.Read(buffer)
-
-	object := s3.PutObjectInput{
-		Bucket:             aws.String(env("S3_BUCKET")),
-		Key:                aws.String(outputFile),
-		Body:               bytes.NewReader(buffer),
-		ContentLength:      aws.Int64(size),
-		ContentType:        aws.String("image/png"),
-		ContentDisposition: aws.String("attachment"),
-		ACL:                aws.String("public-read"),
-	}
-
-	fmt.Println("File uploaded")
-	fmt.Printf("%v\n", object)
-	_, err = uploader.PutObject(&object)
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-	_ = os.Remove(fullPath)
-
-	fmt.Println("Completed in", time.Since(start))
-
-	// Set the response content type to image/png
-	w.Header().Set("Content-Type", "image/png")
-
+        fmt.Println("Item preview completed in", time.Since(start))
+        w.Header().Set("Content-Type", "image/png")
 }
 
-func renderItem(i ItemEvent, w http.ResponseWriter) {
-	// Delegate user avatar rendering logic here
-	s3Config := &aws.Config{
-		Credentials:      credentials.NewStaticCredentials(env("S3_ACCESS_KEY"), env("S3_SECRET_KEY"), ""),
-		Endpoint:         aws.String(env("S3_ENDPOINT")),
-		Region:           aws.String(env("S3_REGION")),
-		S3ForcePathStyle: aws.Bool(true),
-	}
+func generateObjects(
+        torsoColor, leftLegColor, rightLegColor, rightArmColor, headColor, faceID,
+        shirtID, pantsID, tshirtID,
+        hat1, hat2, hat3, hat4, hat5, hat6,
+        toolID, leftArmColor string) []*aeno.Object {
 
-	newSession := session.New(s3Config)
+        var allObjects []*aeno.Object
+        cdnURL := env("CDN_URL")
 
-	// Create an uploader with the session and default options
-	uploader := s3.New(newSession)
+        bodyAndApparelObjects := Texturize(torsoColor, rightArmColor, leftLegColor, rightLegColor, shirtID, pantsID, tshirtID)
+        allObjects = append(allObjects, bodyAndApparelObjects...)
 
-	if i.Hash == "" {
-		fmt.Println("itemstring is required")
-		return
-	}
+        // Add Head
+        allObjects = append(allObjects, &aeno.Object{
+                Mesh:    aeno.LoadObjectFromURL(fmt.Sprintf("%s/assets/Head.obj", cdnURL)),
+                Color:   aeno.HexColor(headColor),
+                Texture: AddFace(faceID),
+                Matrix:  aeno.Identity(),
+        })
 
-	fmt.Println("Getting itemstring", i.Hash)
+        // Add Hats
+        hats := []string{hat1, hat2, hat3, hat4, hat5, hat6}
+        for _, hatID := range hats {
+                if hatID != "none" && hatID != "" {
+                        if obj := RenderItem(hatID); obj != nil {
+                                allObjects = append(allObjects, obj)
+                        }
+                }
+        }
 
-	// Get itemJson from the URL query parameters
-	itemConfig := i.RenderJson
-	itemData := itemConfig.Item
+        // Add Tool and Left Arm
+        armObjects := ToolClause(toolID, leftArmColor, shirtID)
+        allObjects = append(allObjects, armObjects...)
 
-	// Check if UserJson is present
-	if reflect.ValueOf(itemConfig).IsZero() {
-		log.Println("Warning: itemJson query parameter is missing, the item will not render !")
-		http.Error(w, "itemJson query parameter is missing", http.StatusBadRequest)
-		return
-	}
-	start := time.Now()
-	fmt.Println("Drawing Objects...")
-	// Generate the list of objects using the function
-	var objects []*aeno.Object
-
-	renderedObject := RenderItem(itemData)
-	objects = []*aeno.Object{renderedObject}
-
-	fmt.Println("Exporting to", env("TEMP_DIR"), "thumbnails")
-	outputFile := path.Join("thumbnails", i.Hash+".png")
-	outputPath := path.Join(env("TEMP_DIR"), i.Hash+".png")
-
-	aeno.GenerateScene(
-		true,
-		outputPath,
-		objects,
-		aeno.V(1, 2, 3),
-		center,
-		up,
-		fovy,
-		Dimentions,
-		scale,
-		light,
-		amb,
-		lightcolor,
-		near,
-		far,
-	)
-
-	fmt.Println("Uploading to the", env("S3_BUCKET"), "s3 bucket")
-
-	f, err := os.Open(outputPath)
-	if err != nil {
-		fmt.Printf("Failed to open file %q: %v", outputPath, err) // Log the error
-	}
-	defer f.Close()
-
-	fileInfo, _ := f.Stat()
-	var size int64 = fileInfo.Size()
-	buffer := make([]byte, size)
-	f.Read(buffer)
-
-	object := s3.PutObjectInput{
-		Bucket:             aws.String(env("S3_BUCKET")),
-		Key:                aws.String(outputFile),
-		Body:               bytes.NewReader(buffer),
-		ContentLength:      aws.Int64(size),
-		ContentType:        aws.String("image/png"),
-		ContentDisposition: aws.String("attachment"),
-		ACL:                aws.String("public-read"),
-	}
-
-	fmt.Println("File uploaded")
-	fmt.Printf("%v\n", object)
-	_, err = uploader.PutObject(&object)
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-	_ = os.Remove(outputPath)
-
-	fmt.Println("Completed in", time.Since(start))
-
-	// Set the response content type to image/png
-	w.Header().Set("Content-Type", "image/png")
-	// ... (call generateObjects and GenerateScene with item specific logic)
+        return allObjects
 }
 
-func renderHeadshot(e RenderEvent, w http.ResponseWriter) {
-	// Delegate user avatar rendering logic here
-	s3Config := &aws.Config{
-		Credentials:      credentials.NewStaticCredentials(env("S3_ACCESS_KEY"), env("S3_SECRET_KEY"), ""),
-		Endpoint:         aws.String(env("S3_ENDPOINT")),
-		Region:           aws.String(env("S3_REGION")),
-		S3ForcePathStyle: aws.Bool(true),
-	}
+// getTextureFromAPI is a helper function to fetch a texture ID from the API and return an aeno.Texture
+func getTextureFromAPI(itemID string) aeno.Texture {
+        apiUrl := env("API_URL")
+        if itemID == "none" || itemID == "" {
+                return nil
+        }
 
-	newSession := session.New(s3Config)
+        // Fetch poly data from the API
+        resp, err := http.Get(fmt.Sprintf("%s/v1/assets/getPoly/1/%s", apiUrl, itemID))
+        if err != nil {
+                log.Printf("Failed to fetch poly data for item %s: %v", itemID, err)
+                return nil
+        }
+        defer resp.Body.Close()
 
-	// Create an uploader with the session and default options
-	uploader := s3.New(newSession)
+        if resp.StatusCode != http.StatusOK {
+                log.Printf("API returned non-200 status for item %s: %s", itemID, resp.Status)
+                return nil
+        }
 
-	// Delegate headshot rendering logic here
-	fmt.Println("Rendering Headshot...")
-	var (
-		headshot_fovy   = 15.5
-		headshot_near   = 1.0    // Much smaller near plane for close-ups
-		headshot_far    = 1000.0 // Can be smaller for headshots as well
-		headshot_eye    = aeno.V(4, 7, 13)
-		headshot_center = aeno.V(-0.5, 6.8, 0)
-		headshot_up     = aeno.V(0, 4, 0)
-	)
+        var data []map[string]string
+        err = json.NewDecoder(resp.Body).Decode(&data)
+        if err != nil {
+                log.Printf("Failed to decode JSON for item %s: %v", itemID, err)
+                return nil
+        }
 
-	// Get UserJson from the URL query parameters
-	userJson := e.RenderJson
+        if len(data) == 0 {
+                log.Printf("No data returned for item %s", itemID)
+                return nil
+        }
 
-	// Check if UserJson is present
-	if reflect.ValueOf(userJson).IsZero() {
-		log.Println("Warning: UserJson query parameter is missing, the avatar will not render !")
-		http.Error(w, "UserJson query parameter is missing", http.StatusBadRequest)
-		return
-	}
+        textureID := data[0]["texture"]
+        textureID = strings.TrimPrefix(textureID, "asset://")
 
-	start := time.Now()
-	fmt.Println("Drawing Objects...")
-	// Generate the list of objects using the function
-	objects := generateObjects(userJson)
+        if textureID == "" {
+                log.Printf("Texture ID is empty for item %s.", itemID)
+                return nil
+        }
 
-	fmt.Println("Exporting to", env("TEMP_DIR"), "thumbnails")
-	outputFile := path.Join("thumbnails", e.Hash+"_headshot.png")
-
-	path := path.Join(env("TEMP_DIR"), e.Hash+"_headshot.png")
-	aeno.GenerateScene(
-		false,
-		path,
-		objects,
-		headshot_eye,
-		headshot_center,
-		headshot_up,
-		headshot_fovy,
-		Dimentions,
-		scale,
-		light,
-		amb,
-		lightcolor,
-		headshot_near,
-		headshot_far,
-	)
-
-	fmt.Println("Uploading to the", env("S3_BUCKET"), "s3 bucket")
-
-	f, err := os.Open(path)
-	if err != nil {
-		fmt.Printf("Failed to open file %q: %v", path, err) // Log the error
-	}
-	defer f.Close()
-
-	fileInfo, _ := f.Stat()
-	var size int64 = fileInfo.Size()
-	buffer := make([]byte, size)
-	f.Read(buffer)
-
-	object := s3.PutObjectInput{
-		Bucket:             aws.String(env("S3_BUCKET")),
-		Key:                aws.String(outputFile),
-		Body:               bytes.NewReader(buffer),
-		ContentLength:      aws.Int64(size),
-		ContentType:        aws.String("image/png"),
-		ContentDisposition: aws.String("attachment"),
-		ACL:                aws.String("public-read"),
-	}
-
-	fmt.Println("File uploaded")
-	fmt.Printf("%v\n", object)
-	_, err = uploader.PutObject(&object)
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-	_ = os.Remove(path)
-
-	fmt.Println("Completed in", time.Since(start))
-
-	// Set the response content type to image/png
-	w.Header().Set("Content-Type", "image/png")
+        textureURL := fmt.Sprintf("%s/v1/assets/get/%s", apiUrl, textureID)
+        fmt.Printf("Loading texture for item %s from URL: %s\n", itemID, textureURL)
+        return aeno.LoadTextureFromURL(textureURL)
 }
 
-func RenderItem(itemData ItemData) *aeno.Object {
-	if itemData.Item == "none" {
-		return nil // No item to render for this slot
-	}
+func Texturize(torsoColor, rightArmColor, leftLegColor, rightLegColor, shirtID, pantsID, tshirtID string) []*aeno.Object {
+        objects := []*aeno.Object{}
+        cdnUrl := env("CDN_URL")
 
-	cdnURL := env("CDN_URL")
-	meshURL := fmt.Sprintf("%s/uploads/%s.obj", cdnURL, itemData.Item)
-	textureURL := fmt.Sprintf("%s/uploads/%s.png", cdnURL, itemData.Item)
+        shirtTexture := getTextureFromAPI(shirtID)
+        pantsTexture := getTextureFromAPI(pantsID)
+        tshirtTexture := getTextureFromAPI(tshirtID)
 
-	if itemData.EditStyle != nil {
-		if itemData.EditStyle.IsModel {
-			meshURL = fmt.Sprintf("%s/uploads/%s.obj", env("CDN_URL"), itemData.EditStyle.Hash)
-			log.Printf("DEBUG: Applying model override for item %s with style %s\n", itemData.Item, itemData.EditStyle.Hash)
-		}
-		if itemData.EditStyle.IsTexture {
-			textureURL = fmt.Sprintf("%s/uploads/%s.png", env("CDN_URL"), itemData.EditStyle.Hash)
-			log.Printf("DEBUG: Applying texture override for item %s with style %s\n", itemData.Item, itemData.EditStyle.Hash)
-		}
-	}
+        // Torso
+        objects = append(objects, &aeno.Object{
+                Mesh:    aeno.LoadObjectFromURL(fmt.Sprintf("%s/assets/Torso.obj", cdnUrl)),
+                Color:   aeno.HexColor(torsoColor),
+                Texture: shirtTexture,
+                Matrix:  aeno.Identity(),
+        })
 
-	var texture aeno.Texture
-	resp, err := http.Head(textureURL)
-	if err == nil && resp.StatusCode == http.StatusOK {
-		texture = aeno.LoadTextureFromURL(textureURL)
-	} else {
-		fmt.Printf("Info: No texture found for item at %s. Rendering with color only.\n", textureURL)
-	}
+        // Left Arm
+        objects = append(objects, &aeno.Object{
+                Mesh:    aeno.LoadObjectFromURL(fmt.Sprintf("%s/assets/LeftArm.obj", cdnUrl)),
+                Color:   aeno.HexColor(rightArmColor),
+                Texture: shirtTexture,
+                Matrix:  aeno.Identity(),
+        })
 
-	return &aeno.Object{
-		Mesh:    aeno.LoadObjectFromURL(meshURL),
-		Color:   aeno.Transparent,
-		Texture: texture,
-		Matrix:  aeno.Identity(),
-	}
+        // Legs
+        objects = append(objects,
+                &aeno.Object{
+                        Mesh:    aeno.LoadObjectFromURL(fmt.Sprintf("%s/assets/LeftLeg.obj", cdnUrl)),
+                        Color:   aeno.HexColor(leftLegColor),
+                        Texture: pantsTexture,
+                        Matrix:  aeno.Identity(),
+                },
+                &aeno.Object{
+                        Mesh:    aeno.LoadObjectFromURL(fmt.Sprintf("%s/assets/RightLeg.obj", cdnUrl)),
+                        Color:   aeno.HexColor(rightLegColor),
+                        Texture: pantsTexture,
+                        Matrix:  aeno.Identity(),
+                },
+        )
+
+        // T-Shirt Overlay
+        if tshirtID != "none" && tshirtID != "" {
+                objects = append(objects, &aeno.Object{
+                        Mesh:    aeno.LoadObjectFromURL(fmt.Sprintf("%s/assets/tshirt.obj", cdnUrl)),
+                        Color:   aeno.Transparent,
+                        Texture: tshirtTexture,
+                        Matrix:  aeno.Identity(),
+                })
+        }
+
+        return objects
 }
 
-func ToolClause(toolData ItemData, leftArmColor string, shirtTextureHash string) []*aeno.Object {
-	objects := []*aeno.Object{}
-	cdnUrl := env("CDN_URL")
+func ToolClause(toolID, leftArmColor, shirtID string) []*aeno.Object {
+        objects := []*aeno.Object{}
+        cdnUrl := env("CDN_URL")
 
-	var shirtTexture aeno.Texture
-	if shirtTextureHash != "none" {
-		textureURL := fmt.Sprintf("%s/uploads/%s.png", cdnUrl, shirtTextureHash)
-		resp, err := http.Head(textureURL)
-		if err == nil && resp.StatusCode == http.StatusOK {
-			shirtTexture = aeno.LoadTextureFromURL(textureURL)
-		}
-	}
+        shirtTexture := getTextureFromAPI(shirtID)
 
-	var armMesh *aeno.Mesh
+        var armMesh *aeno.Mesh
+        if toolID != "none" && toolID != "" {
+                armMesh = aeno.LoadObjectFromURL(fmt.Sprintf("%s/assets/ArmHold.obj", cdnUrl))
+                if toolObj := RenderItem(toolID); toolObj != nil {
+                        objects = append(objects, toolObj)
+                }
+        } else {
+                armMesh = aeno.LoadObjectFromURL(fmt.Sprintf("%s/assets/RightArm.obj", cdnUrl))
+        }
 
-	if toolData.Item != "none" {
-		armMesh = aeno.LoadObjectFromURL(fmt.Sprintf("%s/assets/arm_tool.obj", cdnUrl))
+        armObject := &aeno.Object{
+                Mesh:    armMesh,
+                Color:   aeno.HexColor(leftArmColor),
+                Texture: shirtTexture,
+                Matrix:  aeno.Identity(),
+        }
+        objects = append(objects, armObject)
 
-		if toolObj := RenderItem(toolData); toolObj != nil {
-			objects = append(objects, toolObj)
-		}
-	} else {
-		// If no tool is equipped, use the default arm mesh.
-		armMesh = aeno.LoadObjectFromURL(fmt.Sprintf("%s/assets/arm_left.obj", cdnUrl))
-	}
-
-	armObject := &aeno.Object{
-		Mesh:    armMesh,
-		Color:   aeno.HexColor(leftArmColor),
-		Texture: shirtTexture, 
-		Matrix:  aeno.Identity(),
-	}
-	objects = append(objects, armObject)
-
-	return objects
+        return objects
 }
 
-func generateObjects(userConfig UserConfig) []*aeno.Object {
-	fmt.Printf("generateObjects: Starting. UserConfig: %+v\n", userConfig)
+func RenderItem(itemID string) *aeno.Object {
+        apiUrl := env("API_URL")
+        if itemID == "none" || itemID == "" {
+                return nil
+        }
 
-	var allObjects []*aeno.Object
-	cdnURL := env("CDN_URL")
+        // Fetch poly data from the API
+        resp, err := http.Get(fmt.Sprintf("%s/v1/assets/getPoly/1/%s", apiUrl, itemID))
+        if err != nil {
+                log.Printf("Failed to fetch poly data for item %s: %v", itemID, err)
+                return nil
+        }
+        defer resp.Body.Close()
 
-	// --- DYNAMICALLY LOAD HEAD MESH ---
-	headMeshName := userConfig.BodyParts.Head
-	if headMeshName == "" {
-		headMeshName = "cranium"
-	}
+        if resp.StatusCode != http.StatusOK {
+                log.Printf("API returned non-200 status for item %s: %s", itemID, resp.Status)
+                return nil
+        }
 
-	var headMeshPath string
-	if headMeshName == "cranium" {
-		headMeshPath = fmt.Sprintf("%s/assets/%s.obj", cdnURL, headMeshName)
-	} else {
-		headMeshPath = fmt.Sprintf("%s/uploads/%s.obj", cdnURL, headMeshName)
-	}
-	cachedCraniumMesh := aeno.LoadObjectFromURL(headMeshPath)
+        var data []map[string]string
+        err = json.NewDecoder(resp.Body).Decode(&data)
+        if err != nil {
+                log.Printf("Failed to decode JSON for item %s: %v", itemID, err)
+                return nil
+        }
 
-	fmt.Printf("generateObjects: Cached Head Mesh Pointer: %p\n", cachedCraniumMesh)
+        if len(data) == 0 {
+                log.Printf("No data returned for item %s", itemID)
+                return nil
+        }
 
-	bodyAndApparelObjects := Texturize(userConfig)
-	allObjects = append(allObjects, bodyAndApparelObjects...)
+        meshID := data[0]["mesh"]
+        meshID = strings.TrimPrefix(meshID, "asset://")
 
-	allObjects = append(allObjects, &aeno.Object{
-		Mesh:   cachedCraniumMesh,
-		Color:  aeno.HexColor(userConfig.Colors["Head"]),
-		Matrix: aeno.Identity(),
-	})
+        textureID := data[0]["texture"]
+        textureID = strings.TrimPrefix(textureID, "asset://")
 
-	fmt.Printf("generateObjects: Cranium mesh added. Total objects: %d\n", len(allObjects))
+        if meshID == "" {
+                log.Printf("Mesh ID is empty for item %s", itemID)
+                return nil // Cannot render without a mesh
+        }
 
-	fmt.Printf("generateObjects: Applying Face. Face Item: %s\n", userConfig.Items.Face.Item)
-	for _, obj := range allObjects {
-		if obj.Mesh != nil {
-			fmt.Printf("  generateObjects: Checking obj mesh %p against cached cranium mesh %p for face texture application.\n", obj.Mesh, cachedCraniumMesh)
-			if obj.Mesh == cachedCraniumMesh {
-				fmt.Printf("  generateObjects: FOUND cranium mesh for face! Applying face texture.\n")
-				obj.Texture = AddFace(userConfig.Items.Face.Item)
-				break
-			}
-		}
-	}
+        meshURL := fmt.Sprintf("%s/v1/assets/get/%s", apiUrl, meshID)
+        var texture aeno.Texture
+        if textureID != "" {
+                textureURL := fmt.Sprintf("%s/v1/assets/get/%s", apiUrl, textureID)
+                texture = aeno.LoadTextureFromURL(textureURL)
+        }
 
-	fmt.Printf("generateObjects: Processing Addon. Addon Item: %s\n", userConfig.Items.Addon.Item)
-	if obj := RenderItem(userConfig.Items.Addon); obj != nil {
-		allObjects = append(allObjects, obj)
-		fmt.Printf("generateObjects: Addon object added. Total objects: %d\n", len(allObjects))
-	}
-
-	fmt.Printf("generateObjects: Processing Hats. Count: %d\n", len(userConfig.Items.Hats))
-	for hatKey, hatItemData := range userConfig.Items.Hats {
-		if !hatKeyPattern.MatchString(hatKey) {
-			log.Printf("Warning: Invalid hat key format: '%s'. Skipping hat.\n", hatKey)
-			continue
-		}
-
-		fmt.Printf("  Hat Key: %s, Item: %s\n", hatKey, hatItemData.Item)
-		if hatItemData.Item != "none" {
-			if obj := RenderItem(hatItemData); obj != nil {
-				allObjects = append(allObjects, obj)
-				fmt.Printf("Hat object for %s added. Total objects: %d\n", hatKey, len(allObjects))
-			}
-		}
-	}
-	fmt.Printf("generateObjects: Finished. Final object count: %d\n", len(allObjects))
-	return allObjects
+        return &aeno.Object{
+                Mesh:    aeno.LoadObjectFromURL(meshURL),
+                Color:   aeno.Transparent,
+                Texture: texture,
+                Matrix:  aeno.Identity(),
+        }
 }
 
-func Texturize(config UserConfig) []*aeno.Object {
-	objects := []*aeno.Object{}
-	cdnUrl := env("CDN_URL")
+func AddFace(faceID string) aeno.Texture {
+        apiUrl := env("API_URL")
+        cdnURL := env("CDN_URL")
 
-	// Helper function to build the correct path
-	getMeshPath := func(partName, defaultName string) string {
-		if partName == "" {
-			partName = defaultName
-		}
-		if partName == defaultName {
-			return fmt.Sprintf("%s/assets/%s.obj", cdnUrl, partName)
-		}
-		return fmt.Sprintf("%s/uploads/%s.obj", cdnUrl, partName)
-	}
+        if faceID == "" || faceID == "none" {
+                defaultURL := fmt.Sprintf("%s/assets/DefaultFace.png", cdnURL)
+                fmt.Printf("AddFace: No face provided. Using default face texture: %s\n", defaultURL)
+                return aeno.LoadTextureFromURL(defaultURL)
+        }
 
-	// --- CACHED MESH REFERENCES FOR TEXTURIZE'S INTERNAL USE ---
-	// These are loaded once within Texturize to ensure consistent pointers for its internal slice indexing.
-	torsoPath := getMeshPath(config.BodyParts.Torso, "chesticle")
-	rightArmPath := getMeshPath(config.BodyParts.RightArm, "arm_right")
-	leftLegPath := getMeshPath(config.BodyParts.LeftLeg, "leg_left")
-	rightLegPath := getMeshPath(config.BodyParts.RightLeg, "leg_right")
+        // Fetch poly data from the API to get the texture asset ID
+        resp, err := http.Get(fmt.Sprintf("%s/v1/assets/getPoly/1/%s", apiUrl, faceID))
+        if err != nil {
+                log.Printf("Failed to fetch poly data for face %s: %v", faceID, err)
+                return nil
+        }
+        defer resp.Body.Close()
 
-	cachedChesticleMesh := aeno.LoadObjectFromURL(torsoPath)
-	cachedArmRightMesh := aeno.LoadObjectFromURL(rightArmPath)
-	cachedLegLeftMesh := aeno.LoadObjectFromURL(leftLegPath)
-	cachedLegRightMesh := aeno.LoadObjectFromURL(rightLegPath)
-	cachedTeeMesh := aeno.LoadObjectFromURL(fmt.Sprintf("%s/assets/tee.obj", cdnUrl))
+        if resp.StatusCode != http.StatusOK {
+                log.Printf("API returned non-200 status for face %s: %s", faceID, resp.Status)
+                return nil
+        }
 
-	objects = append(objects, &aeno.Object{
-		Mesh:   cachedChesticleMesh,
-		Color:  aeno.HexColor(config.Colors["Torso"]),
-		Matrix: aeno.Identity(),
-	})
+        var data []map[string]string
+        err = json.NewDecoder(resp.Body).Decode(&data)
+        if err != nil {
+                log.Printf("Failed to decode JSON for face %s: %v", faceID, err)
+                return nil
+        }
 
-	fmt.Printf("Texturize: Added Chesticle Mesh Pointer: %p\n", cachedChesticleMesh)
+        if len(data) == 0 {
+                log.Printf("No data returned for face %s", faceID)
+                return nil
+        }
 
-	objects = append(objects, &aeno.Object{
-		Mesh:   cachedArmRightMesh,
-		Color:  aeno.HexColor(config.Colors["RightArm"]),
-		Matrix: aeno.Identity(),
-	})
-	fmt.Printf("Texturize: Added Right Arm Mesh Pointer: %p\n", cachedArmRightMesh)
+        textureID := data[0]["texture"]
+        textureID = strings.TrimPrefix(textureID, "asset://")
 
-	objects = append(objects,
-		&aeno.Object{
-			Mesh:   cachedLegLeftMesh,
-			Color:  aeno.HexColor(config.Colors["LeftLeg"]),
-			Matrix: aeno.Identity(),
-		},
-		&aeno.Object{
-			Mesh:   cachedLegRightMesh,
-			Color:  aeno.HexColor(config.Colors["RightLeg"]),
-			Matrix: aeno.Identity(),
-		},
-	)
-	fmt.Printf("Texturize: Added Left Leg Mesh Pointer: %p\n", cachedLegLeftMesh)
-	fmt.Printf("Texturize: Added Right Leg Mesh Pointer: %p\n", cachedLegRightMesh)
+        if textureID == "" {
+                log.Printf("Texture ID is empty for face %s, using default.", faceID)
+                defaultURL := fmt.Sprintf("%s/assets/DefaultFace.png", cdnURL)
+                return aeno.LoadTextureFromURL(defaultURL)
+        }
 
-	fmt.Println("Texturize: Initial body meshes created in order for slicing:")
-	for i, obj := range objects {
-		if obj.Mesh != nil {
-			fmt.Printf("  Texturize Index %d: Mesh Pointer %p\n", i, obj.Mesh)
-		}
-	}
-
-	fmt.Printf("Texturize: Processing Shirt. Shirt Item: %s\n", config.Items.Shirt.Item)
-	if config.Items.Shirt.Item != "none" {
-		shirtTextureURL := fmt.Sprintf("%s/uploads/%s.png", cdnUrl, config.Items.Shirt.Item)
-		fmt.Printf("Texturize: Loading shirt texture from URL: %s\n", shirtTextureURL)
-		shirtTexture := aeno.LoadTextureFromURL(shirtTextureURL)
-
-		fmt.Printf("Texturize: Shirt texture loaded. Applying to objects[0:2] (torso, right arm).\n")
-		for _, obj := range objects[0:2] {
-			fmt.Printf("  Texturize: Applying shirt texture to mesh %p\n", obj.Mesh)
-			obj.Texture = shirtTexture
-		}
-	}
-
-	fmt.Printf("Texturize: Processing Pants. Pants Item: %s\n", config.Items.Pants.Item)
-	if config.Items.Pants.Item != "none" {
-		pantsTextureURL := fmt.Sprintf("%s/uploads/%s.png", cdnUrl, config.Items.Pants.Item)
-		fmt.Printf("Texturize: Loading pants texture from URL: %s\n", pantsTextureURL)
-		pantsTexture := aeno.LoadTextureFromURL(pantsTextureURL)
-
-		fmt.Printf("Texturize: Pants texture loaded. Applying to objects[2:] (legs).\n")
-		for _, obj := range objects[2:] {
-			fmt.Printf("Texturize: Applying pants texture to mesh %p\n", obj.Mesh)
-			obj.Texture = pantsTexture
-		}
-	}
-
-	fmt.Printf("Texturize: Processing T-shirt. T-shirt Item: %s\n", config.Items.Tshirt.Item)
-	if config.Items.Tshirt.Item != "none" {
-		tshirtTextureURL := fmt.Sprintf("%s/uploads/%s.png", cdnUrl, config.Items.Tshirt.Item)
-		fmt.Printf("Texturize: Loading T-shirt texture from URL: %s\n", tshirtTextureURL)
-		tshirtTexture := aeno.LoadTextureFromURL(tshirtTextureURL)
-
-		fmt.Printf("Texturize: T-shirt texture loaded. Adding as new object.\n")
-		TshirtLoader := &aeno.Object{
-			Mesh:    cachedTeeMesh,
-			Color:   aeno.Transparent,
-			Texture: tshirtTexture,
-			Matrix:  aeno.Identity(),
-		}
-		objects = append(objects, TshirtLoader)
-		fmt.Printf("Texturize: T-shirt object added. Total objects: %d\n", len(objects))
-	}
-
-	fmt.Printf("Texturize: Processing Tool. Tool Item: %s\n", config.Items.Tool.Item)
-	armObjects := ToolClause(
-		config.Items.Tool,
-		config.Colors["LeftArm"],
-		config.Items.Shirt.Item,
-	)
-	objects = append(objects, armObjects...)
-	fmt.Printf("Texturize: Tool/Arm objects added. Total objects: %d\n", len(objects))
-
-	return objects
-}
-
-// --- Adapted generatePreview Function ---
-func generatePreview(itemConfig ItemConfig) []*aeno.Object {
-	fmt.Printf("generatePreview: Starting for ItemType: %s, Item: %+v\n", itemConfig.ItemType, itemConfig.Item)
-
-	previewConfig := useDefault
-
-	itemType := itemConfig.ItemType
-	itemData := itemConfig.Item
-
-	switch itemType {
-	case "face":
-		previewConfig.Items.Face = itemData
-	case "hat":
-		previewConfig.Items.Hats = make(HatsCollection)
-		previewConfig.Items.Hats["hat_1"] = itemData
-	case "addon":
-		previewConfig.Items.Addon = itemData
-	case "tool":
-		previewConfig.Items.Tool = itemData
-	case "pants":
-		previewConfig.Items.Pants = itemData
-	case "shirt":
-		previewConfig.Items.Shirt = itemData
-	case "tshirt":
-		previewConfig.Items.Tshirt = itemData
-	case "head":
-		if itemData.Item != "none" {
-			previewConfig.BodyParts.Head = itemData.Item
-		}
-	default:
-		fmt.Printf("generatePreview: Unhandled item type '%s'. Showing default avatar.\n", itemType)
-	}
-	return generateObjects(previewConfig)
-}
-
-func AddFace(faceHash string) aeno.Texture {
-	var face aeno.Texture
-
-	faceURL := ""
-	if faceHash != "none" {
-		faceURL = fmt.Sprintf("%s/uploads/%s.png", env("CDN_URL"), faceHash)
-	} else {
-		faceURL = fmt.Sprintf("%s/assets/default.png", env("CDN_URL"))
-	}
-
-	fmt.Printf("AddFace: Loading face texture from URL: %s\n", faceURL)
-	face = aeno.LoadTextureFromURL(faceURL)
-
-	fmt.Printf("AddFace: Loaded texture for %s. (No nil check possible for value type)\n", faceURL)
-
-	return face
+        // Only PNGs are supported for faces, so we construct the URL directly.
+        textureURL := fmt.Sprintf("%s/v1/assets/get/%s", apiUrl, textureID)
+        fmt.Printf("AddFace: Loading face texture from URL: %s\n", textureURL)
+        return aeno.LoadTextureFromURL(textureURL)
 }
